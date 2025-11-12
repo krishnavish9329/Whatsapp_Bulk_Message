@@ -5,7 +5,6 @@ const fs = require('fs/promises');
 const path = require('path');
 const puppeteer = require('puppeteer');
 
-const CSV_PATH = path.join(__dirname, 'input.csv');
 const USER_DATA_DIR = path.join(__dirname, 'puppeteer_data');
 
 // If your numbers are local (no country code), set this.
@@ -114,7 +113,28 @@ async function sendOne(page, rawPhone, message) {
 }
 
 async function main() {
-  const csv = await fs.readFile(CSV_PATH, 'utf8');
+  // Determine input file from runtime args; default: input.csv in current working dir
+  const args = process.argv.slice(2);
+  let fileArg = '';
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--file' || a === '-f') {
+      fileArg = args[i + 1] || '';
+      i++;
+    } else if (!a.startsWith('-') && !fileArg) {
+      fileArg = a;
+    }
+  }
+  const inputPath = path.resolve(process.cwd(), fileArg || 'input.csv');
+
+  let csv;
+  try {
+    csv = await fs.readFile(inputPath, 'utf8');
+  } catch (e) {
+    console.error(`Could not read input file at ${inputPath}`);
+    console.error('Pass a path like: node index.js --file data.csv');
+    return;
+  }
   const rows = parseCSV(csv);
   if (!rows.length) {
     console.log('No rows found in CSV.');
