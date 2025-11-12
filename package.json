@@ -1,14 +1,14 @@
 {
-  "name": "whatapp_message",
+  "name": "krishna-whatapp",
   "version": "1.0.0",
-  "description": "no",
+  "description": "",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "author": "krishna",
+  "author": "",
   "license": "ISC",
   "dependencies": {
-    "puppeteer": "^24.23.0"
+    "puppeteer": "^24.29.1"
   }
 }

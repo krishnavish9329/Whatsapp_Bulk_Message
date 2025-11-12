@@ -1,100 +1,155 @@
-const puppeteer = require('puppeteer');
-const fs = require('fs').promises;
+// Sends WhatsApp messages from input.csv with headers: phone,message
+// Requires: Node 18+, npm install puppeteer
+
+const fs = require('fs/promises');
 const path = require('path');
+const puppeteer = require('puppeteer');
 
+const CSV_PATH = path.join(__dirname, 'input.csv');
 const USER_DATA_DIR = path.join(__dirname, 'puppeteer_data');
-const CONTACTS_FILE = path.join(__dirname, 'contacts.json');
-const FLAG_FILE = path.join(__dirname, 'first_run_done.txt');
-const NAV_TIMEOUT = 60000;
 
-// ======= STEP 1: Check if script was already run once =======
-(async () => {
-  try {
-    await fs.access(FLAG_FILE);
-    console.log('✅ WhatsApp automation already executed once. Exiting...');
-    process.exit(0);
-  } catch {
-    console.log('🚀 First run detected. Proceeding to send WhatsApp messages...');
-  }
-})();
+// If your numbers are local (no country code), set this.
+// Example for India: '91'. Leave '' if CSV already has full intl numbers.
+const DEFAULT_COUNTRY_CODE = '';
 
-async function readContacts() {
-  try {
-    const raw = await fs.readFile(CONTACTS_FILE, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return [
-       { phone: '7723065844', message: 'Hello Krishna! This is an automated message.'},
-        { phone: '7869722272', message: 'Hello Krishna! This is an automated message. genereted me code'},
-        // { phone: '8827944207', message: 'Hello'},
-        // { phone: '9329229531', message: 'Hello '},
-        // { phone: '7974815528', message: 'Hello tum khana ka li'}
-    ];
-  }
-}
-
+// Cross-version safe delay helper (older Puppeteer lacks page.waitForTimeout)
 function sleep(ms) {
   return new Promise(res => setTimeout(res, ms));
 }
 
-async function sendToNumber(page, phone, message) {
-  const encoded = encodeURIComponent(message || '');
-  const url = `https://web.whatsapp.com/send?phone=${phone}&text=${encoded}`;
+function normalizePhone(raw) {
+  let p = String(raw || '').replace(/[^\d]/g, '');
+  if (!p) return '';
+  // Strip leading zeros
+  p = p.replace(/^0+/, '');
+  if (DEFAULT_COUNTRY_CODE && !p.startsWith(DEFAULT_COUNTRY_CODE)) {
+    p = DEFAULT_COUNTRY_CODE + p;
+  }
+  return p;
+}
+
+// Minimal CSV parser supporting quotes and commas in fields
+function splitCSVLine(line) {
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQuotes && line[i + 1] === '"') {
+        cur += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+    } else if (c === ',' && !inQuotes) {
+      out.push(cur);
+      cur = '';
+    } else {
+      cur += c;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+
+function parseCSV(content) {
+  content = content.replace(/^\uFEFF/, '');
+  const lines = content.split(/\r?\n/).filter(l => l.trim() !== '');
+  if (!lines.length) return [];
+
+  const headers = splitCSVLine(lines.shift()).map(h => h.trim().toLowerCase());
+  const phoneIdx = headers.indexOf('phone');
+  const messageIdx = headers.indexOf('message');
+  if (phoneIdx === -1 || messageIdx === -1) {
+    throw new Error('CSV must have headers: phone,message');
+  }
+
+  const rows = [];
+  for (const line of lines) {
+    const cols = splitCSVLine(line);
+    rows.push({
+      phone: cols[phoneIdx] ?? '',
+      message: cols[messageIdx] ?? ''
+    });
+  }
+  return rows;
+}
+
+async function sendOne(page, rawPhone, message) {
+  const phone = normalizePhone(rawPhone);
+  if (!phone) {
+    console.warn('Skipping row with empty/invalid phone');
+    return;
+  }
+  const encoded = encodeURIComponent(message ?? '');
+  const url = `https://web.whatsapp.com/send?phone=${phone}&text=${encoded}&type=phone_number&app_absent=0`;
 
   try {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: NAV_TIMEOUT });
-    await page.waitForSelector('div[contenteditable="true"][data-tab]', { timeout: 20000 });
+    await page.goto(url, { waitUntil: 'networkidle2' });
 
-    const sendBtn = await page.$('button[data-testid="compose-btn-send"], span[data-icon="send"]');
-    if (sendBtn) {
-      await sendBtn.click();
+    // Wait for the message box to be available
+    await page.waitForSelector('div[contenteditable="true"]', { timeout: 60000 });
+
+    // Give WhatsApp a moment to hydrate UI
+    await sleep(500);
+
+    // Try send button; fallback to Enter
+    const sendButton =
+      (await page.$('button[aria-label*="Send"]')) ||
+      (await page.$('button[data-testid="compose-btn-send"]')) ||
+      (await page.$('span[data-icon="send"]'));
+
+    if (sendButton) {
+      await sendButton.click();
     } else {
       await page.keyboard.press('Enter');
     }
 
-    await sleep(1500);
-    console.log(`✅ Message sent to ${phone}`);
+    await sleep(1200);
+    console.log(`Sent to ${phone}`);
   } catch (err) {
-    console.error(`❌ Error sending to ${phone}:`, err.message);
+    console.warn(`Failed to send to ${phone}: ${err.message}`);
   }
 }
 
-async function deleteFlagFile() {
-  try {
-    await fs.unlink(FLAG_FILE);
-    console.log('🗑️  Flag file deleted. Script can run again next time.');
-  } catch {
-    console.log('⚠️  No flag file found to delete (maybe first run failed).');
+async function main() {
+  const csv = await fs.readFile(CSV_PATH, 'utf8');
+  const rows = parseCSV(csv);
+  if (!rows.length) {
+    console.log('No rows found in CSV.');
+    return;
   }
-}
 
-(async () => {
-  const contacts = await readContacts();
+  console.log(`Loaded ${rows.length} row(s). Launching WhatsApp Web...`);
 
   const browser = await puppeteer.launch({
     headless: false,
     userDataDir: USER_DATA_DIR,
     defaultViewport: null,
+    args: ['--start-maximized']
   });
 
-  const page = await browser.newPage();
-  console.log('📱 Opening WhatsApp Web... Scan the QR code if prompted.');
+  try {
+    const page = await browser.newPage();
+    await page.goto('https://web.whatsapp.com', { waitUntil: 'networkidle2' });
+    // Wait for login; scan QR if needed
+    await page.waitForSelector('#app', { timeout: 0 });
 
-  for (const contact of contacts) {
-    await sendToNumber(page, contact.phone, contact.message);
-    await sleep(3000);
+    for (let i = 0; i < rows.length; i++) {
+      const { phone, message } = rows[i];
+      await sendOne(page, phone, message);
+      await sleep(1000);
+    }
+
+    console.log('All messages attempted.');
+  } finally {
+    // Keep open so you can verify. Close if preferred.
+    // await browser.close();
   }
+}
 
-  // ======= STEP 2: Mark script as executed once =======
-  await fs.writeFile(FLAG_FILE, 'done');
-  console.log('\n✅ Messages sent and flag saved. Next time, this script will not run again.');
-
-  await browser.close();
-
-  // delete the file
-
-  await deleteFlagFile();
-
-
-})();
-
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});
